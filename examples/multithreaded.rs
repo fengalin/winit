@@ -83,12 +83,18 @@ fn main() {
                             Right | Left => {
                                 video_mode_id = match key {
                                     Left => video_mode_id.saturating_sub(1),
-                                    Right => (video_modes.as_ref().unwrap().len() - 1).min(video_mode_id + 1),
+                                    Right => (video_modes.as_ref().unwrap().len() - 1)
+                                        .min(video_mode_id + 1),
                                     _ => unreachable!(),
                                 };
                                 println!(
                                     "Picking video mode: {}",
-                                    video_modes.as_ref().unwrap().iter().nth(video_mode_id).unwrap()
+                                    video_modes
+                                        .as_ref()
+                                        .unwrap()
+                                        .iter()
+                                        .nth(video_mode_id)
+                                        .unwrap()
                                 );
                             }
                             F => window.set_fullscreen(match (state, modifiers.alt()) {
@@ -96,7 +102,13 @@ fn main() {
                                     Some(Fullscreen::Borderless(window.current_monitor()))
                                 }
                                 (true, true) => Some(Fullscreen::Exclusive(
-                                    video_modes.as_ref().unwrap().iter().nth(video_mode_id).unwrap().clone(),
+                                    video_modes
+                                        .as_ref()
+                                        .unwrap()
+                                        .iter()
+                                        .nth(video_mode_id)
+                                        .unwrap()
+                                        .clone(),
                                 )),
                                 (false, _) => None,
                             }),

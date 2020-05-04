@@ -2,115 +2,113 @@ use std::sync::{Arc, Mutex};
 
 use super::{event_loop::EventsSink, make_wid, DeviceId};
 use smithay_client_toolkit::{
-    keyboard::{
-        self, map_keyboard_auto_with_repeat, Event as KbEvent, KeyRepeatEvent, KeyRepeatKind,
+    reexports::client::{
+        protocol::{wl_keyboard, wl_seat},
+        Attached,
     },
-    reexports::client::protocol::{wl_keyboard, wl_seat},
+    seat::keyboard::{self, map_keyboard, Event as KbEvent},
 };
 
 use crate::event::{ElementState, KeyboardInput, ModifiersState, VirtualKeyCode, WindowEvent};
 
 pub fn init_keyboard(
-    seat: &wl_seat::WlSeat,
+    seat: &Attached<wl_seat::WlSeat>,
     sink: EventsSink,
     modifiers_tracker: Arc<Mutex<ModifiersState>>,
 ) -> wl_keyboard::WlKeyboard {
     // { variables to be captured by the closures
     let target = Arc::new(Mutex::new(None));
+    let repeat_target = target.clone();
+    // FIXME these could be part of dispatchdata
     let my_sink = sink.clone();
     let repeat_sink = sink.clone();
-    let repeat_target = target.clone();
     let my_modifiers = modifiers_tracker.clone();
     // }
-    let ret = map_keyboard_auto_with_repeat(
-        seat,
-        KeyRepeatKind::System,
-        move |evt: KbEvent<'_>, _| {
-            match evt {
-                KbEvent::Enter { surface, .. } => {
-                    let wid = make_wid(&surface);
-                    my_sink.send_window_event(WindowEvent::Focused(true), wid);
-                    *target.lock().unwrap() = Some(wid);
+    let ret = map_keyboard(seat, None, move |evt: KbEvent<'_>, _, _| match evt {
+        KbEvent::Enter { surface, .. } => {
+            let wid = make_wid(&surface);
+            my_sink.send_window_event(WindowEvent::Focused(true), wid);
+            *target.lock().unwrap() = Some(wid);
 
-                    let modifiers = *modifiers_tracker.lock().unwrap();
+            let modifiers = *modifiers_tracker.lock().unwrap();
 
-                    if !modifiers.is_empty() {
-                        my_sink.send_window_event(WindowEvent::ModifiersChanged(modifiers), wid);
-                    }
+            if !modifiers.is_empty() {
+                my_sink.send_window_event(WindowEvent::ModifiersChanged(modifiers), wid);
+            }
+        }
+        KbEvent::Leave { surface, .. } => {
+            let wid = make_wid(&surface);
+            let modifiers = *modifiers_tracker.lock().unwrap();
+
+            if !modifiers.is_empty() {
+                my_sink
+                    .send_window_event(WindowEvent::ModifiersChanged(ModifiersState::empty()), wid);
+            }
+
+            my_sink.send_window_event(WindowEvent::Focused(false), wid);
+            *target.lock().unwrap() = None;
+        }
+        KbEvent::Key {
+            rawkey,
+            keysym,
+            state,
+            utf8,
+            ..
+        } => {
+            if let Some(wid) = *target.lock().unwrap() {
+                let state = match state {
+                    wl_keyboard::KeyState::Pressed => ElementState::Pressed,
+                    wl_keyboard::KeyState::Released => ElementState::Released,
+                    _ => unreachable!(),
+                };
+                let vkcode = key_to_vkey(rawkey, keysym);
+                my_sink.send_window_event(
+                    #[allow(deprecated)]
+                    WindowEvent::KeyboardInput {
+                        device_id: crate::event::DeviceId(crate::platform_impl::DeviceId::Wayland(
+                            DeviceId,
+                        )),
+                        input: KeyboardInput {
+                            state,
+                            scancode: rawkey,
+                            virtual_keycode: vkcode,
+                            modifiers: modifiers_tracker.lock().unwrap().clone(),
+                        },
+                        is_synthetic: false,
+                    },
+                    wid,
+                );
+                // send char event only on key press, not release
+                if let ElementState::Released = state {
+                    return;
                 }
-                KbEvent::Leave { surface, .. } => {
-                    let wid = make_wid(&surface);
-                    let modifiers = *modifiers_tracker.lock().unwrap();
-
-                    if !modifiers.is_empty() {
-                        my_sink.send_window_event(
-                            WindowEvent::ModifiersChanged(ModifiersState::empty()),
-                            wid,
-                        );
-                    }
-
-                    my_sink.send_window_event(WindowEvent::Focused(false), wid);
-                    *target.lock().unwrap() = None;
-                }
-                KbEvent::Key {
-                    rawkey,
-                    keysym,
-                    state,
-                    utf8,
-                    ..
-                } => {
-                    if let Some(wid) = *target.lock().unwrap() {
-                        let state = match state {
-                            wl_keyboard::KeyState::Pressed => ElementState::Pressed,
-                            wl_keyboard::KeyState::Released => ElementState::Released,
-                            _ => unreachable!(),
-                        };
-                        let vkcode = key_to_vkey(rawkey, keysym);
-                        my_sink.send_window_event(
-                            #[allow(deprecated)]
-                            WindowEvent::KeyboardInput {
-                                device_id: crate::event::DeviceId(
-                                    crate::platform_impl::DeviceId::Wayland(DeviceId),
-                                ),
-                                input: KeyboardInput {
-                                    state,
-                                    scancode: rawkey,
-                                    virtual_keycode: vkcode,
-                                    modifiers: modifiers_tracker.lock().unwrap().clone(),
-                                },
-                                is_synthetic: false,
-                            },
-                            wid,
-                        );
-                        // send char event only on key press, not release
-                        if let ElementState::Released = state {
-                            return;
-                        }
-                        if let Some(txt) = utf8 {
-                            for chr in txt.chars() {
-                                my_sink.send_window_event(WindowEvent::ReceivedCharacter(chr), wid);
-                            }
-                        }
-                    }
-                }
-                KbEvent::RepeatInfo { .. } => { /* Handled by smithay client toolkit */ }
-                KbEvent::Modifiers {
-                    modifiers: event_modifiers,
-                } => {
-                    let modifiers = ModifiersState::from_wayland(event_modifiers);
-
-                    *modifiers_tracker.lock().unwrap() = modifiers;
-
-                    if let Some(wid) = *target.lock().unwrap() {
-                        my_sink.send_window_event(WindowEvent::ModifiersChanged(modifiers), wid);
+                if let Some(txt) = utf8 {
+                    for chr in txt.chars() {
+                        my_sink.send_window_event(WindowEvent::ReceivedCharacter(chr), wid);
                     }
                 }
             }
-        },
-        move |repeat_event: KeyRepeatEvent, _| {
+        }
+        KbEvent::Modifiers {
+            modifiers: event_modifiers,
+        } => {
+            let modifiers = ModifiersState::from_wayland(event_modifiers);
+
+            *modifiers_tracker.lock().unwrap() = modifiers;
+
+            if let Some(wid) = *target.lock().unwrap() {
+                my_sink.send_window_event(WindowEvent::ModifiersChanged(modifiers), wid);
+            }
+        }
+        KbEvent::Repeat {
+            rawkey,
+            keysym,
+            utf8,
+            ..
+        } => {
             if let Some(wid) = *repeat_target.lock().unwrap() {
                 let state = ElementState::Pressed;
-                let vkcode = key_to_vkey(repeat_event.rawkey, repeat_event.keysym);
+                let vkcode = key_to_vkey(rawkey, keysym);
                 repeat_sink.send_window_event(
                     #[allow(deprecated)]
                     WindowEvent::KeyboardInput {
@@ -119,7 +117,7 @@ pub fn init_keyboard(
                         )),
                         input: KeyboardInput {
                             state,
-                            scancode: repeat_event.rawkey,
+                            scancode: rawkey,
                             virtual_keycode: vkcode,
                             modifiers: my_modifiers.lock().unwrap().clone(),
                         },
@@ -127,16 +125,17 @@ pub fn init_keyboard(
                     },
                     wid,
                 );
-                if let Some(txt) = repeat_event.utf8 {
+                if let Some(txt) = utf8 {
                     for chr in txt.chars() {
                         repeat_sink.send_window_event(WindowEvent::ReceivedCharacter(chr), wid);
                     }
                 }
             }
-        },
-    );
+        }
+    });
 
     match ret {
+        // repeat events are routed via the EventsSink
         Ok(keyboard) => keyboard,
         Err(_) => {
             // This is a fallback impl if libxkbcommon was not available
@@ -146,55 +145,51 @@ pub fn init_keyboard(
             // In this case, we don't have the keymap information (it is
             // supposed to be serialized by the compositor using libxkbcommon)
 
-            seat.get_keyboard(|keyboard| {
-                // { variables to be captured by the closure
-                let mut target = None;
-                let my_sink = sink;
-                // }
+            let keyboard = seat.get_keyboard();
+            // FIXME dispatchdata?
+            let mut target = None;
+            let my_sink = sink;
 
-                keyboard.implement_closure(
-                    move |evt, _| match evt {
-                        wl_keyboard::Event::Enter { surface, .. } => {
-                            let wid = make_wid(&surface);
-                            my_sink.send_window_event(WindowEvent::Focused(true), wid);
-                            target = Some(wid);
-                        }
-                        wl_keyboard::Event::Leave { surface, .. } => {
-                            let wid = make_wid(&surface);
-                            my_sink.send_window_event(WindowEvent::Focused(false), wid);
-                            target = None;
-                        }
-                        wl_keyboard::Event::Key { key, state, .. } => {
-                            if let Some(wid) = target {
-                                let state = match state {
-                                    wl_keyboard::KeyState::Pressed => ElementState::Pressed,
-                                    wl_keyboard::KeyState::Released => ElementState::Released,
-                                    _ => unreachable!(),
-                                };
-                                my_sink.send_window_event(
-                                    #[allow(deprecated)]
-                                    WindowEvent::KeyboardInput {
-                                        device_id: crate::event::DeviceId(
-                                            crate::platform_impl::DeviceId::Wayland(DeviceId),
-                                        ),
-                                        input: KeyboardInput {
-                                            state,
-                                            scancode: key,
-                                            virtual_keycode: None,
-                                            modifiers: ModifiersState::default(),
-                                        },
-                                        is_synthetic: false,
-                                    },
-                                    wid,
-                                );
-                            }
-                        }
-                        _ => (),
-                    },
-                    (),
-                )
-            })
-            .unwrap()
+            keyboard.quick_assign(move |_keyboard, evt, _data| match evt {
+                wl_keyboard::Event::Enter { surface, .. } => {
+                    let wid = make_wid(&surface);
+                    my_sink.send_window_event(WindowEvent::Focused(true), wid);
+                    target = Some(wid);
+                }
+                wl_keyboard::Event::Leave { surface, .. } => {
+                    let wid = make_wid(&surface);
+                    my_sink.send_window_event(WindowEvent::Focused(false), wid);
+                    target = None;
+                }
+                wl_keyboard::Event::Key { key, state, .. } => {
+                    if let Some(wid) = target {
+                        let state = match state {
+                            wl_keyboard::KeyState::Pressed => ElementState::Pressed,
+                            wl_keyboard::KeyState::Released => ElementState::Released,
+                            _ => unreachable!(),
+                        };
+                        my_sink.send_window_event(
+                            #[allow(deprecated)]
+                            WindowEvent::KeyboardInput {
+                                device_id: crate::event::DeviceId(
+                                    crate::platform_impl::DeviceId::Wayland(DeviceId),
+                                ),
+                                input: KeyboardInput {
+                                    state,
+                                    scancode: key,
+                                    virtual_keycode: None,
+                                    modifiers: ModifiersState::default(),
+                                },
+                                is_synthetic: false,
+                            },
+                            wid,
+                        );
+                    }
+                }
+                _ => (),
+            });
+
+            keyboard.detach()
         }
     }
 }
@@ -217,7 +212,7 @@ fn key_to_vkey(rawkey: u32, keysym: u32) -> Option<VirtualKeyCode> {
 }
 
 fn keysym_to_vkey(keysym: u32) -> Option<VirtualKeyCode> {
-    use smithay_client_toolkit::keyboard::keysyms;
+    use smithay_client_toolkit::seat::keyboard::keysyms;
     match keysym {
         // letters
         keysyms::XKB_KEY_A | keysyms::XKB_KEY_a => Some(VirtualKeyCode::A),

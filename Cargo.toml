@@ -76,10 +76,12 @@ features = [
 ]
 
 [target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd"))'.dependencies]
-wayland-client = { version = "0.23.0", features = [ "dlopen", "egl", "cursor", "eventloop"] }
+#calloop = "0.6"
+calloop = { git = "https://github.com/fengalin/calloop", branch = "non-static-sources-and-callback" }
 mio = "0.6"
 mio-extras = "2.0"
-smithay-client-toolkit = "^0.6.6"
+#smithay-client-toolkit = "^0.8.1"
+smithay-client-toolkit = { git = "https://github.com/fengalin/client-toolkit", branch = "fengalin/update_calloop", features = [ "dlopen" ] }
 x11-dl = "2.18.5"
 percent-encoding = "2.0"
 

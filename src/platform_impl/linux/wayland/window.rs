@@ -18,13 +18,15 @@ use crate::{
 };
 
 use smithay_client_toolkit::{
-    output::OutputMgr,
+    get_surface_outputs, get_surface_scale_factor,
     reexports::client::{
-        protocol::{wl_seat, wl_surface},
+        protocol::{wl_output, wl_surface},
         Display,
     },
-    surface::{get_dpi_factor, get_outputs},
-    window::{ConceptFrame, Event as WEvent, State as WState, Theme, Window as SWindow},
+    window::{
+        ConceptConfig, ConceptFrame, Decorations, Event as WEvent, State as WState,
+        Window as SWindow,
+    },
 };
 
 use super::{event_loop::CursorManager, make_wid, EventLoopWindowTarget, MonitorHandle, WindowId};
@@ -33,7 +35,7 @@ pub struct Window {
     surface: wl_surface::WlSurface,
     frame: Arc<Mutex<SWindow<ConceptFrame>>>,
     cursor_manager: Arc<Mutex<CursorManager>>,
-    outputs: OutputMgr, // Access to info for all monitors
+    outputs: Vec<wl_output::WlOutput>,
     size: Arc<Mutex<(u32, u32)>>,
     kill_switch: (Arc<Mutex<bool>>, Arc<Mutex<bool>>),
     display: Arc<Display>,
@@ -41,7 +43,7 @@ pub struct Window {
     need_refresh: Arc<Mutex<bool>>,
     fullscreen: Arc<Mutex<bool>>,
     cursor_grab_changed: Arc<Mutex<Option<bool>>>, // Update grab state
-    decorated: Arc<Mutex<bool>>,
+    decorations: Arc<Mutex<Decorations>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -57,18 +59,20 @@ impl Window {
         pl_attribs: PlAttributes,
     ) -> Result<Window, RootOsError> {
         // Create the surface first to get initial DPI
+        // FIXME move window_store to DispatchData
         let window_store = evlp.store.clone();
         let cursor_manager = evlp.cursor_manager.clone();
-        let surface = evlp.env.create_surface(move |scale_factor, surface| {
-            window_store
-                .lock()
-                .unwrap()
-                .scale_factor_change(&surface, scale_factor);
-            surface.set_buffer_scale(scale_factor);
-        });
+        let surface =
+            evlp.env
+                .create_surface_with_scale_callback(move |scale_factor, surface, _data| {
+                    window_store
+                        .lock()
+                        .unwrap()
+                        .scale_factor_change(&surface, scale_factor);
+                    surface.set_buffer_scale(scale_factor);
+                });
 
-        // Always 1.
-        let scale_factor = get_dpi_factor(&surface);
+        let scale_factor = get_surface_scale_factor(&surface);
 
         let (width, height) = attributes
             .inner_size
@@ -81,73 +85,75 @@ impl Window {
 
         let window_store = evlp.store.clone();
 
-        let decorated = Arc::new(Mutex::new(attributes.decorations));
         let pending_decorations_action = Arc::new(Mutex::new(None));
 
         let my_surface = surface.clone();
-        let mut frame = SWindow::<ConceptFrame>::init_from_env(
-            &evlp.env,
-            surface.clone(),
-            (width, height),
-            move |event| match event {
-                WEvent::Configure { new_size, states } => {
-                    let mut store = window_store.lock().unwrap();
-                    let is_fullscreen = states.contains(&WState::Fullscreen);
+        let mut frame = evlp
+            .env
+            .create_window(
+                surface.clone(),
+                (width, height),
+                move |event, _dispatch_data| match event {
+                    WEvent::Configure { new_size, states } => {
+                        // FIXME window_store might be a candidate for a Filter's UserData
+                        let mut store = window_store.lock().unwrap();
+                        let is_fullscreen = states.contains(&WState::Fullscreen);
 
-                    for window in &mut store.windows {
-                        if window.surface.as_ref().equals(&my_surface.as_ref()) {
-                            window.new_size = new_size;
-                            *(window.need_refresh.lock().unwrap()) = true;
-                            {
-                                // Get whether we're in fullscreen
-                                let mut fullscreen = window.fullscreen.lock().unwrap();
-                                // Fullscreen state was changed, so update decorations
-                                if *fullscreen != is_fullscreen {
-                                    let decorated = { *window.decorated.lock().unwrap() };
-                                    if decorated {
-                                        *window.pending_decorations_action.lock().unwrap() =
-                                            if is_fullscreen {
-                                                Some(DecorationsAction::Hide)
-                                            } else {
-                                                Some(DecorationsAction::Show)
-                                            };
+                        for window in &mut store.windows {
+                            if window.surface.as_ref().equals(&my_surface.as_ref()) {
+                                window.new_size = new_size;
+                                *(window.need_refresh.lock().unwrap()) = true;
+                                {
+                                    // Get whether we're in fullscreen
+                                    let mut fullscreen = window.fullscreen.lock().unwrap();
+                                    // Fullscreen state was changed, so update decorations
+                                    if *fullscreen != is_fullscreen {
+                                        let decorations = { *window.decorations.lock().unwrap() };
+                                        match decorations {
+                                            Decorations::None => (),
+                                            _ => {
+                                                *window
+                                                    .pending_decorations_action
+                                                    .lock()
+                                                    .unwrap() = if is_fullscreen {
+                                                    Some(DecorationsAction::Hide)
+                                                } else {
+                                                    Some(DecorationsAction::Show)
+                                                };
+                                            }
+                                        }
                                     }
+                                    *fullscreen = is_fullscreen;
                                 }
-                                *fullscreen = is_fullscreen;
+                                *(window.need_frame_refresh.lock().unwrap()) = true;
+                                return;
                             }
-                            *(window.need_frame_refresh.lock().unwrap()) = true;
-                            return;
                         }
                     }
-                }
-                WEvent::Refresh => {
-                    let store = window_store.lock().unwrap();
-                    for window in &store.windows {
-                        if window.surface.as_ref().equals(&my_surface.as_ref()) {
-                            *(window.need_frame_refresh.lock().unwrap()) = true;
-                            return;
+                    WEvent::Refresh => {
+                        let store = window_store.lock().unwrap();
+                        for window in &store.windows {
+                            if window.surface.as_ref().equals(&my_surface.as_ref()) {
+                                *(window.need_frame_refresh.lock().unwrap()) = true;
+                                return;
+                            }
                         }
                     }
-                }
-                WEvent::Close => {
-                    let mut store = window_store.lock().unwrap();
-                    for window in &mut store.windows {
-                        if window.surface.as_ref().equals(&my_surface.as_ref()) {
-                            window.closed = true;
-                            return;
+                    WEvent::Close => {
+                        let mut store = window_store.lock().unwrap();
+                        for window in &mut store.windows {
+                            if window.surface.as_ref().equals(&my_surface.as_ref()) {
+                                window.closed = true;
+                                return;
+                            }
                         }
                     }
-                }
-            },
-        )
-        .unwrap();
+                },
+            )
+            .unwrap();
 
         if let Some(app_id) = pl_attribs.app_id {
             frame.set_app_id(app_id);
-        }
-
-        for &(_, ref seat) in evlp.seats.lock().unwrap().iter() {
-            frame.new_seat(seat);
         }
 
         // Check for fullscreen requirements
@@ -169,7 +175,12 @@ impl Window {
         frame.set_resizable(attributes.resizable);
 
         // set decorations
-        frame.set_decorate(attributes.decorations);
+        let decorations = if attributes.decorations {
+            Decorations::FollowServer
+        } else {
+            Decorations::None
+        };
+        frame.set_decorate(decorations);
 
         // set title
         frame.set_title(attributes.title);
@@ -191,6 +202,7 @@ impl Window {
         let frame = Arc::new(Mutex::new(frame));
         let need_refresh = Arc::new(Mutex::new(true));
         let cursor_grab_changed = Arc::new(Mutex::new(None));
+        let decorations = Arc::new(Mutex::new(decorations));
 
         evlp.store.lock().unwrap().windows.push(InternalWindow {
             closed: false,
@@ -205,16 +217,20 @@ impl Window {
             frame: Arc::downgrade(&frame),
             current_scale_factor: scale_factor,
             new_scale_factor: None,
-            decorated: decorated.clone(),
+            decorations: decorations.clone(),
             pending_decorations_action: pending_decorations_action.clone(),
         });
-        evlp.evq.borrow_mut().sync_roundtrip().unwrap();
+        // FIXME args?
+        evlp.evq
+            .borrow_mut()
+            .sync_roundtrip(&mut (), |_, _, _| ())
+            .unwrap();
 
         Ok(Window {
             display: evlp.display.clone(),
             surface,
             frame,
-            outputs: evlp.env.outputs.clone(),
+            outputs: evlp.env.get_all_outputs(),
             size,
             kill_switch: (kill_switch, evlp.cleanup_needed.clone()),
             need_frame_refresh,
@@ -222,7 +238,7 @@ impl Window {
             cursor_manager,
             fullscreen,
             cursor_grab_changed,
-            decorated,
+            decorations,
         })
     }
 
@@ -307,12 +323,17 @@ impl Window {
 
     #[inline]
     pub fn scale_factor(&self) -> i32 {
-        get_dpi_factor(&self.surface)
+        get_surface_scale_factor(&self.surface)
     }
 
     pub fn set_decorations(&self, decorate: bool) {
-        *(self.decorated.lock().unwrap()) = decorate;
-        self.frame.lock().unwrap().set_decorate(decorate);
+        let decorations = if decorate {
+            Decorations::FollowServer
+        } else {
+            Decorations::None
+        };
+        *(self.decorations.lock().unwrap()) = decorations;
+        self.frame.lock().unwrap().set_decorate(decorations);
         *(self.need_frame_refresh.lock().unwrap()) = true;
     }
 
@@ -359,8 +380,8 @@ impl Window {
         }
     }
 
-    pub fn set_theme<T: Theme>(&self, theme: T) {
-        self.frame.lock().unwrap().set_theme(theme)
+    pub fn set_wayland_theme(&self, theme: ConceptConfig) {
+        self.frame.lock().unwrap().set_frame_config(theme)
     }
 
     #[inline]
@@ -395,11 +416,8 @@ impl Window {
     }
 
     pub fn current_monitor(&self) -> MonitorHandle {
-        let output = get_outputs(&self.surface).last().unwrap().clone();
-        MonitorHandle {
-            proxy: output,
-            mgr: self.outputs.clone(),
-        }
+        let output = get_surface_outputs(&self.surface).last().unwrap().clone();
+        MonitorHandle { proxy: output }
     }
 
     pub fn available_monitors(&self) -> VecDeque<MonitorHandle> {
@@ -413,7 +431,7 @@ impl Window {
     pub fn raw_window_handle(&self) -> WaylandHandle {
         WaylandHandle {
             surface: self.surface().as_ref().c_ptr() as *mut _,
-            display: self.display().as_ref().c_ptr() as *mut _,
+            display: self.display().c_ptr() as *mut _,
             ..WaylandHandle::empty()
         }
     }
@@ -444,7 +462,7 @@ struct InternalWindow {
     frame: Weak<Mutex<SWindow<ConceptFrame>>>,
     current_scale_factor: i32,
     new_scale_factor: Option<i32>,
-    decorated: Arc<Mutex<bool>>,
+    decorations: Arc<Mutex<Decorations>>,
     pending_decorations_action: Arc<Mutex<Option<DecorationsAction>>>,
 }
 
@@ -494,14 +512,6 @@ impl WindowStore {
             }
         });
         pruned
-    }
-
-    pub fn new_seat(&self, seat: &wl_seat::WlSeat) {
-        for window in &self.windows {
-            if let Some(w) = window.frame.upgrade() {
-                w.lock().unwrap().new_seat(seat);
-            }
-        }
     }
 
     fn scale_factor_change(&mut self, surface: &wl_surface::WlSurface, new: i32) {

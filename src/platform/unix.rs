@@ -2,7 +2,7 @@
 
 use std::{os::raw, ptr, sync::Arc};
 
-use smithay_client_toolkit::window::{ButtonState as SCTKButtonState, Theme as SCTKTheme};
+use smithay_client_toolkit::window::{ButtonState as SCTKButtonState, ConceptConfig};
 
 use crate::{
     dpi::Size,
@@ -207,7 +207,7 @@ pub trait WindowExtUnix {
     fn wayland_display(&self) -> Option<*mut raw::c_void>;
 
     /// Sets the color theme of the client side window decorations on wayland
-    fn set_wayland_theme<T: Theme>(&self, theme: T);
+    fn set_wayland_theme(&self, theme: ConceptConfig);
 
     /// Check if the window is ready for drawing
     ///
@@ -279,15 +279,15 @@ impl WindowExtUnix for Window {
     #[inline]
     fn wayland_display(&self) -> Option<*mut raw::c_void> {
         match self.window {
-            LinuxWindow::Wayland(ref w) => Some(w.display().as_ref().c_ptr() as *mut _),
+            LinuxWindow::Wayland(ref w) => Some(w.display().c_ptr() as *mut _),
             _ => None,
         }
     }
 
     #[inline]
-    fn set_wayland_theme<T: Theme>(&self, theme: T) {
+    fn set_wayland_theme(&self, theme: ConceptConfig) {
         match self.window {
-            LinuxWindow::Wayland(ref w) => w.set_theme(WaylandTheme(theme)),
+            LinuxWindow::Wayland(ref w) => w.set_wayland_theme(theme),
             _ => {}
         }
     }
@@ -391,81 +391,6 @@ impl MonitorHandleExtUnix for MonitorHandle {
     #[inline]
     fn native_id(&self) -> u32 {
         self.inner.native_identifier()
-    }
-}
-
-/// Wrapper for implementing SCTK's theme trait.
-struct WaylandTheme<T: Theme>(T);
-
-pub trait Theme: Send + 'static {
-    /// Primary color of the scheme.
-    fn primary_color(&self, window_active: bool) -> [u8; 4];
-
-    /// Secondary color of the scheme.
-    fn secondary_color(&self, window_active: bool) -> [u8; 4];
-
-    /// Color for the close button.
-    fn close_button_color(&self, status: ButtonState) -> [u8; 4];
-
-    /// Icon color for the close button, defaults to the secondary color.
-    #[allow(unused_variables)]
-    fn close_button_icon_color(&self, status: ButtonState) -> [u8; 4] {
-        self.secondary_color(true)
-    }
-
-    /// Background color for the maximize button.
-    fn maximize_button_color(&self, status: ButtonState) -> [u8; 4];
-
-    /// Icon color for the maximize button, defaults to the secondary color.
-    #[allow(unused_variables)]
-    fn maximize_button_icon_color(&self, status: ButtonState) -> [u8; 4] {
-        self.secondary_color(true)
-    }
-
-    /// Background color for the minimize button.
-    fn minimize_button_color(&self, status: ButtonState) -> [u8; 4];
-
-    /// Icon color for the minimize button, defaults to the secondary color.
-    #[allow(unused_variables)]
-    fn minimize_button_icon_color(&self, status: ButtonState) -> [u8; 4] {
-        self.secondary_color(true)
-    }
-}
-
-impl<T: Theme> SCTKTheme for WaylandTheme<T> {
-    fn get_primary_color(&self, active: bool) -> [u8; 4] {
-        self.0.primary_color(active)
-    }
-
-    fn get_secondary_color(&self, active: bool) -> [u8; 4] {
-        self.0.secondary_color(active)
-    }
-
-    fn get_close_button_color(&self, status: SCTKButtonState) -> [u8; 4] {
-        self.0.close_button_color(ButtonState::from_sctk(status))
-    }
-
-    fn get_close_button_icon_color(&self, status: SCTKButtonState) -> [u8; 4] {
-        self.0
-            .close_button_icon_color(ButtonState::from_sctk(status))
-    }
-
-    fn get_maximize_button_color(&self, status: SCTKButtonState) -> [u8; 4] {
-        self.0.maximize_button_color(ButtonState::from_sctk(status))
-    }
-
-    fn get_maximize_button_icon_color(&self, status: SCTKButtonState) -> [u8; 4] {
-        self.0
-            .maximize_button_icon_color(ButtonState::from_sctk(status))
-    }
-
-    fn get_minimize_button_color(&self, status: SCTKButtonState) -> [u8; 4] {
-        self.0.minimize_button_color(ButtonState::from_sctk(status))
-    }
-
-    fn get_minimize_button_icon_color(&self, status: SCTKButtonState) -> [u8; 4] {
-        self.0
-            .minimize_button_icon_color(ButtonState::from_sctk(status))
     }
 }
 
