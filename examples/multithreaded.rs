@@ -21,20 +21,30 @@ fn main() {
             .build(&event_loop)
             .unwrap();
 
-        let mut video_modes: Vec<_> = window.current_monitor().video_modes().collect();
+        let mut video_modes: Option<Vec<_>> = None;
+        //let mut video_modes: Option<Vec<_>> = Some(window.current_monitor().video_modes().collect());
         let mut video_mode_id = 0usize;
 
         let (tx, rx) = mpsc::channel();
         window_senders.insert(window.id(), tx);
         thread::spawn(move || {
             while let Ok(event) = rx.recv() {
+                println!("{:?}", event);
                 match event {
+                    WindowEvent::Focused(true) => {
+                        if video_modes.is_none() {
+                            video_modes = Some(window.current_monitor().video_modes().collect());
+                        }
+                    }
                     WindowEvent::Moved { .. } => {
                         // We need to update our chosen video mode if the window
                         // was moved to an another monitor, so that the window
                         // appears on this monitor instead when we go fullscreen
-                        let previous_video_mode = video_modes.iter().cloned().nth(video_mode_id);
-                        video_modes = window.current_monitor().video_modes().collect();
+                        let previous_video_mode = video_modes
+                            .as_ref()
+                            .and_then(|video_modes| video_modes.iter().cloned().nth(video_mode_id));
+                        video_modes = Some(window.current_monitor().video_modes().collect());
+                        let video_modes = video_modes.as_ref().unwrap();
                         video_mode_id = video_mode_id.min(video_modes.len());
                         let video_mode = video_modes.iter().nth(video_mode_id);
 
@@ -44,7 +54,7 @@ fn main() {
                         if video_mode != previous_video_mode.as_ref() {
                             println!(
                                 "Window moved to another monitor, picked video mode: {}",
-                                video_modes.iter().nth(video_mode_id).unwrap()
+                                video_mode.unwrap(),
                             );
                         }
                     }
@@ -73,12 +83,12 @@ fn main() {
                             Right | Left => {
                                 video_mode_id = match key {
                                     Left => video_mode_id.saturating_sub(1),
-                                    Right => (video_modes.len() - 1).min(video_mode_id + 1),
+                                    Right => (video_modes.as_ref().unwrap().len() - 1).min(video_mode_id + 1),
                                     _ => unreachable!(),
                                 };
                                 println!(
                                     "Picking video mode: {}",
-                                    video_modes.iter().nth(video_mode_id).unwrap()
+                                    video_modes.as_ref().unwrap().iter().nth(video_mode_id).unwrap()
                                 );
                             }
                             F => window.set_fullscreen(match (state, modifiers.alt()) {
@@ -86,7 +96,7 @@ fn main() {
                                     Some(Fullscreen::Borderless(window.current_monitor()))
                                 }
                                 (true, true) => Some(Fullscreen::Exclusive(
-                                    video_modes.iter().nth(video_mode_id).unwrap().clone(),
+                                    video_modes.as_ref().unwrap().iter().nth(video_mode_id).unwrap().clone(),
                                 )),
                                 (false, _) => None,
                             }),
